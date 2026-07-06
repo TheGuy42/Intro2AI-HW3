@@ -1,0 +1,6 @@
+normal,normal,smoky,#,normal,normal
+normal,#,slippery,#,smoky,normal
+normal,#,normal,slippery,normal,normal
+smoky,normal,#,damaged,#,normal
+#,slippery,normal,normal,damaged,normal
+normal,normal,#,smoky,normal,normal

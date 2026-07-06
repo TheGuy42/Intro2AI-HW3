@@ -1,0 +1,9 @@
+name: hw3-rescue
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - matplotlib=3.8.*
+  - pillow=10.*
+  - pytest=8.*
+  - pip

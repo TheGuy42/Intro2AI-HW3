@@ -1,0 +1,10 @@
+{
+  "default_horizon": 20,
+  "max_battery": 6,
+  "recharge_amount": 3,
+  "step_cost": -1.0,
+  "success_reward": 60.0,
+  "danger_reward": -70.0,
+  "timeout_penalty": -25.0,
+  "battery_empty_penalty": -35.0
+}
