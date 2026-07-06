@@ -72,7 +72,7 @@ def finite_horizon_dp(env: RescueEnv, horizon: int) -> tuple[dict[int, dict[Stat
                         best_action = action
                 
                 V[t][state] = best_value
-                if (best_action is not None) and (not env.is_terminal(state)):
+                if best_action is not None:
                     Policy[t][state] = best_action
     
     return V, Policy
@@ -148,7 +148,7 @@ def compare_policy_slices(
     table = []
     for state in states_to_show:
         actions_by_time = {}
-        for t in range(1, len(policy) + 1):
+        for t in sorted(policy.keys()):
             if state in policy[t]:
                 actions_by_time[t] = policy[t][state]
         if actions_by_time:
