@@ -9,6 +9,7 @@ from typing import Any
 
 from rescue_env import RescueEnv
 from rescue_types import Action, State
+import random
 
 # state is a tuple of: row, col, carrying, battery, time_remaining
 
@@ -92,10 +93,7 @@ def rollout_time_dependent_policy(
     Expected return keys:
         mean_return, success_rate, mean_length, failure_breakdown, returns
     """
-
-    import random #TODO: ask in piazza if this is allowed
     rng = random.Random(seed)
-    #TODO: no given horizon..
     
     total_return = 0.0
     total_successes = 0
@@ -103,10 +101,12 @@ def rollout_time_dependent_policy(
     failure_breakdown = {}
     returns = []
 
+    horizon = max(policy.keys())  # Determine the horizon from the policy keys
+
     for episode in range(n_episodes):
         rng_seed = rng.randint(0, 2**32 - 1)  # Generate a new seed for each episode
         # print(f"Episode {episode + 1}/{n_episodes} with seed {rng_seed}")
-        simulation_res = env.simulate(policy, seed=rng_seed)
+        simulation_res = env.simulate(policy, horizon=horizon, seed=rng_seed)
 
         total_return += simulation_res["return"]
         total_length += simulation_res["length"]
