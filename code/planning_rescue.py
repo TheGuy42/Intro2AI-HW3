@@ -13,7 +13,6 @@ import random
 
 # state is a tuple of: row, col, carrying, battery, time_remaining
 
-
 def action_value(env: RescueEnv, V_next: dict[State, float], state: State, action: Action) -> float:
     """Return the one-step finite-horizon backup for one action.
 
@@ -68,7 +67,7 @@ def finite_horizon_dp(env: RescueEnv, horizon: int) -> tuple[dict[int, dict[Stat
                 best_action = None
                 for action in env.actions(state): # calculating the action maximizing the value
                     value = action_value(env, V[t - 1], state, action)
-                    if value > best_value:
+                    if value > best_value + 1e-9:
                         best_value = value
                         best_action = action
                 
@@ -145,12 +144,16 @@ def compare_policy_slices(
         {"state": state, "actions_by_time": {t: action, ...}}
     """
 
+    rows_by_base = {}
     table = []
     for state in states_to_show:
-        actions_by_time = {}
+        base = state[:4]  # row, col, carrying, battery (without time_remaining)
+        if base not in rows_by_base:
+            rows_by_base[base] = {"state": state, "actions_by_time": {}}
+            table.append(rows_by_base[base])
+        actions_by_time = rows_by_base[base]["actions_by_time"]
         for t in sorted(policy.keys()):
-            if state in policy[t]:
-                actions_by_time[t] = policy[t][state]
-        if actions_by_time:
-            table.append({"state": state, "actions_by_time": actions_by_time})
-    return table
+            full_state = base + (t,)
+            if full_state in policy[t]:
+                actions_by_time[t] = policy[t][full_state]
+    return [row for row in table if row["actions_by_time"]]

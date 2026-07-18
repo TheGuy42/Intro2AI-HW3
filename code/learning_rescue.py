@@ -15,7 +15,6 @@ import random # TODO: ask in piazza if this is allowed
 AlphaSchedule = Callable[[int], float]
 EpsilonSchedule = Callable[[int], float]
 
-
 def estimate_transition_reward_model(
     trajectories: list[dict[str, Any]],
     actions: tuple[Action, ...],
@@ -66,7 +65,7 @@ def estimate_transition_reward_model(
         model["states"].add(state)
         if state not in model["actions_by_state"]:
             model["actions_by_state"][state] = set()
-        # We will order the actions later
+        
         model["actions_by_state"][state].add(action)
 
         if (state, action) not in Q_hat:
@@ -75,7 +74,7 @@ def estimate_transition_reward_model(
             Q_hat[(state, action)][next_state] = []
         Q_hat[(state, action)][next_state].append(reward)
 
-    # Now compute the transition probabilities and mean rewards
+    # compute the transition probabilities and mean rewards
     for (state, action), next_states in Q_hat.items():
         total_count = sum(len(rewards) for rewards in next_states.values())
         num_next_states = len(next_states)
@@ -132,27 +131,28 @@ def plan_with_estimated_model(
 
     for t in range(horizon + 1):
         for state in states_by_time[t]:
-            if t == 0:
+            actions = model["actions_by_state"].get(state, ())
+            if t == 0 or not actions:
                 V[t][state] = 0.0
-            else:
-                best_value = float('-inf')
-                best_action = None
-                actions = model["actions_by_state"].get(state, ())
-                for action in actions:
-                    transitions = model["transitions"].get((state, action), [])
-                    value = sum(prob * (reward + V[t - 1].get(next_state, 0.0)) for prob, next_state, reward in transitions)
-                    if value > best_value:
-                        best_value = value
-                        best_action = action
-                V[t][state] = best_value
-                if best_action is not None:
-                    Policy[t][state] = best_action
+                continue
+
+            best_value = float('-inf')
+            best_action = None
+            for action in actions:
+                transitions = model["transitions"].get((state, action), [])
+                value = sum(prob * (reward + V[t - 1].get(next_state, 0.0)) for prob, next_state, reward in transitions)
+                if value > best_value:
+                    best_value = value
+                    best_action = action
+            V[t][state] = best_value
+            if best_action is not None:
+                Policy[t][state] = best_action
 
     return Policy
 
 
 
-def first_visit_mc(
+def first_visit_mc_w_count(
     env: RescueEnv,
     policy: dict[int, dict[State, Action]] | dict[State, Action],
     n_episodes: int,
@@ -163,35 +163,108 @@ def first_visit_mc(
 
     Use random.Random(seed) to generate a fresh deterministic seed for each
     episode; do not pass the same seed to every rollout.
+
+    return a dict[State, tuple[float, int]] mapping each visited state to a tuple of (estimated value, visit count). The visit count is the number of times the state was updated during learning.
     """
     rng = random.Random(seed)
+    horizon = max(policy) if all(isinstance(k, int) for k in policy) else None
 
     V_pi = {}
 
     for episode_id in range(n_episodes):
         episode_seed = rng.randint(0, 2**32 - 1)
-        episode = env.simulate(policy, seed=episode_seed)
+        episode = env.simulate(policy, horizon=horizon, seed=episode_seed)
         trajectory = episode["trajectory"]
 
         trajectory_reward = 0.0
-        visited_states = set()
+        visited_states = {}
         reversed_trajectory = list(reversed(trajectory))
         for step in reversed_trajectory:
             state, action, reward, next_state, done = step
             trajectory_reward = reward + gamma * trajectory_reward
-            if state not in visited_states:
-                visited_states.add(state)
-                if state not in V_pi:
-                    V_pi[state] = []
-                V_pi[state].append(trajectory_reward)
+            visited_states[state] = trajectory_reward
+        
+        for state, return_value in visited_states.items():
+            if state not in V_pi:
+                V_pi[state] = []
+            V_pi[state].append(return_value)
     
     # Average the returns for each state
     for state in V_pi:
-        V_pi[state] = sum(V_pi[state]) / len(V_pi[state])
+        V_pi[state] = (sum(V_pi[state]) / len(V_pi[state]), len(V_pi[state]))
 
     return V_pi
-            
 
+def first_visit_mc(
+    env: RescueEnv,
+    policy: dict[int, dict[State, Action]] | dict[State, Action],
+    n_episodes: int,
+    gamma: float,
+    seed: int,
+) -> dict[State, tuple[float, int]]:
+    """Estimate V^pi from sampled episodes using first-visit Monte Carlo.
+
+    Use random.Random(seed) to generate a fresh deterministic seed for each
+    episode; do not pass the same seed to every rollout.
+
+    """
+    V_pi_with_count = first_visit_mc_w_count(env, policy, n_episodes, gamma, seed)
+    # Extract only the estimated values from the (value, count) tuples
+    V_pi = {state: value for state, (value, count) in V_pi_with_count.items()}
+    return V_pi
+
+def td_prediction_w_count(
+    env: RescueEnv,
+    policy: dict[int, dict[State, Action]] | dict[State, Action],
+    n_episodes: int,
+    alpha_schedule: AlphaSchedule,
+    gamma: float,
+    seed: int,
+) -> dict[State, tuple[float, int]]:
+    """Estimate V^pi from online interaction using TD(0).
+
+    Count TD updates from t=0 upward when calling alpha_schedule(t). Use a fresh
+    deterministic episode seed derived from seed for each episode.
+
+    return a dict[State, tuple[float, int]] mapping each visited state to a tuple of (estimated value, visit count). The visit count is the number of times the state was updated during TD learning.
+
+    """
+    rng = random.Random(seed)
+    time_indexed = all(isinstance(k, int) for k in policy)
+    horizon = max(policy) if time_indexed else None
+
+    V_pi = {}
+    step = 0  # counts TD updates across the whole run, not per episode
+
+    for episode_id in range(n_episodes):
+        episode_seed = rng.randint(0, 2**32 - 1)
+        current_state = env.reset(horizon=horizon, seed=episode_seed)
+
+        while not env.is_terminal(current_state):
+            time_remaining = current_state[4]
+            if time_indexed:
+                action = policy.get(time_remaining, {}).get(current_state)
+            else:
+                action = policy.get(current_state)
+            if action is None:
+                action = env.actions(current_state)[0]
+            next_state, reward, done, _ = env.step(action)
+
+            if current_state not in V_pi:
+                V_pi[current_state] = (rng.random(), 0)  # Initialize with a random value, we know the state is non-terminal
+
+            alpha_t = alpha_schedule(step)
+            next_value = 0.0 if done else V_pi.get(next_state, (0.0, 0))[0]
+            td_target = reward + gamma * next_value
+            curr_value, count = V_pi.get(current_state, (0.0, 0))
+            td_error = td_target - curr_value
+            V_pi[current_state] = (curr_value + alpha_t * td_error, count + 1)
+            # V_pi[current_state] += alpha_t * td_error
+
+            current_state = next_state
+            step += 1
+        
+    return V_pi
 
 def td_prediction(
     env: RescueEnv,
@@ -206,52 +279,9 @@ def td_prediction(
     Count TD updates from t=0 upward when calling alpha_schedule(t). Use a fresh
     deterministic episode seed derived from seed for each episode.
     """
-    rng = random.Random(seed)
-
-    V_pi = {}
-
-    for episode_id in range(n_episodes):
-        episode_seed = rng.randint(0, 2**32 - 1)
-        current_state = env.reset(seed=episode_seed)
-        step = 0
-        
-        
-        while not env.is_terminal(current_state):
-            #TODO: verify if we should take the first action if not found in policy
-            time_remaining = current_state[4]
-            action = policy.get(time_remaining, {}).get(current_state, env.actions(current_state)[0]) 
-            next_state, reward, done, _ = env.step(action)
-
-            if current_state not in V_pi:
-                V_pi[current_state] = rng.random()  # Initialize with a random value, we know the state is non-terminal
-
-            alpha_t = alpha_schedule(step)
-            next_value = 0.0 if done else V_pi.get(next_state, 0.0)
-            td_target = reward + gamma * next_value
-            td_error = td_target - V_pi[current_state]
-            V_pi[current_state] += alpha_t * td_error
-
-            current_state = next_state
-            step += 1
-        
-        # episode = env.simulate(policy, seed=episode_seed)
-        # trajectory = episode["trajectory"]
-
-        # for t, step in enumerate(trajectory):
-        #     state = step["state"]
-        #     reward = step["reward"]
-        #     next_state = step["next_state"]
-        #     done = step["done"]
-
-        #     if state not in V_pi:
-        #         V_pi[state] = 0.0 if env.is_terminal(state) else rng.random()  # Initialize with a random value for non-terminal states
-
-        #     alpha_t = alpha_schedule(t)
-        #     next_value = 0.0 if done else V_pi.get(next_state, 0.0)
-        #     td_target = reward + gamma * next_value
-        #     td_error = td_target - V_pi[state]
-        #     V_pi[state] += alpha_t * td_error
-
+    V_pi_with_count = td_prediction_w_count(env, policy, n_episodes, alpha_schedule, gamma, seed)
+    # Extract only the estimated values from the (value, count) tuples
+    V_pi = {state: value for state, (value, count) in V_pi_with_count.items()}
     return V_pi
 
 
@@ -272,11 +302,11 @@ def q_learning_rescue(
     rng = random.Random(seed)
 
     Q = {}
+    step = 0  # counts Q updates across the whole run, not per episode
 
     for episode_id in range(n_episodes):
         episode_seed = rng.randint(0, 2**32 - 1)
         current_state = env.reset(seed=episode_seed)
-        step = 0
 
         while not env.is_terminal(current_state):
             epsilon_t = epsilon_schedule(step)
@@ -316,12 +346,80 @@ def q_learning_rescue(
     # Derive the greedy policy from Q
     #TODO: we can probably optimize this by keeping track of the best action during learning
     policy = {}
-    for (state, action), q_value in Q.items():
-        if state not in policy or q_value > Q[(state, policy[state])]:
-            policy[state] = action
+    for state in {s for (s, _) in Q}:
+        best_value = float('-inf')
+        best_action = None
+        for action in env.actions(state):
+            q_value = Q.get((state, action), 0.0)
+            if q_value > best_value:
+                best_value = q_value
+                best_action = action
+        if best_action is not None:
+            policy[state] = best_action
 
     return Q, policy
-            
+
+boltzmann_rng = random.Random(0)  
+def q_learning_rescue_boltzmann(
+    env: RescueEnv,
+    n_episodes: int,
+    alpha_schedule: AlphaSchedule,
+    # epsilon_schedule: EpsilonSchedule,
+    gamma: float,
+    seed: int,
+    temperature: float = 1.0,
+) -> tuple[dict[tuple[State, Action], float], dict[State, Action]]:
+    """Learn a tabular Q policy with Boltzmann exploration.
+
+    Count Q updates from t=0 upward when calling alpha_schedule(t) and
+    env.actions(state). Break greedy ties using env.actions(state) order.
+    """
+    rng = random.Random(seed)
+    boltzmann_rng.seed(seed)  # Seed the Boltzmann RNG for reproducibility
+
+    Q = {}
+    step = 0  # counts Q updates across the whole run, not per episode
+
+    for episode_id in range(n_episodes):
+        episode_seed = rng.randint(0, 2**32 - 1)
+        current_state = env.reset(seed=episode_seed)
+
+        while not env.is_terminal(current_state):
+            # epsilon_t = epsilon_schedule(step)
+            legal_actions = env.actions(current_state)
+            action = boltzmann_action(Q, current_state, legal_actions, temperature=temperature)
+
+            next_state, reward, done, _ = env.step(action)
+
+            # Initialize Q-value for this state-action pair if not seen before
+            if (current_state, action) not in Q:
+                Q[(current_state, action)] = 0.0
+
+            alpha_t = alpha_schedule(step)
+            next_max_q = max(Q.get((next_state, a), 0.0) for a in env.actions(next_state)) if not done else 0.0
+            td_target = reward + gamma * next_max_q
+            td_error = td_target - Q[(current_state, action)]
+            Q[(current_state, action)] += alpha_t * td_error
+
+            current_state = next_state
+            step += 1
+
+    # Derive the greedy policy from Q
+    #TODO: we can probably optimize this by keeping track of the best action during learning
+    policy = {}
+    for state in {s for (s, _) in Q}:
+        best_value = float('-inf')
+        best_action = None
+        for action in env.actions(state):
+            q_value = Q.get((state, action), 0.0)
+            if q_value > best_value:
+                best_value = q_value
+                best_action = action
+        if best_action is not None:
+            policy[state] = best_action
+
+    return Q, policy
+
 def boltzmann_action(
     Q: dict[tuple[State, Action], float],
     state: State,
@@ -340,7 +438,7 @@ def boltzmann_action(
     total = sum(exp_probs)
     normalized_probs = [p / total for p in exp_probs]
 
-    action = random.choices(actions, weights=normalized_probs, k=1)[0]
+    action = boltzmann_rng.choices(actions, weights=normalized_probs, k=1)[0]
     return action
 
 def evaluate_rescue_agent(
